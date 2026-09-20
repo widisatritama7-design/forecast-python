@@ -1,14 +1,16 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
-#   📊  MASTER DATA TRANSFORMER  v2.9
+#   📊  MASTER DATA TRANSFORMER  v3.0
 #   ─────────────────────────────────────────────────────────────────────
-#   Fitur v2.9:
+#   Fitur v3.0:
 #   - 3 Mode Operasi:
 #       1. Buat Master Baru    — upload file sumber
 #       2. Update Master       — upload master + data baru (+ PDS opsional)
 #       3. Hitung PDS/Delivery — upload master + PDS (untuk hitung rumus)
-#   - Rumus dihitung di Python
+#   - Rumus dihitung di Python (bukan formula Excel)
 #   - Template PDS & Delivery (auto-generate)
+#   - Kolom SAP Code (dari file PDS/Delivery, diulang per Part Number)
+#   - Format PDS/Delivery: SAP CODE | ITEM | Jan-26 | Feb-26 | ...
 #   - Warna: qty hijau jika ≠ 0, formula hijau jika ≥ 0 / merah jika < 0 / "-"
 #
 # ═══════════════════════════════════════════════════════════════════════════
@@ -98,6 +100,7 @@ BULAN_SCAN_END   = 31
 
 COL_FILE_FROM = 'File From'
 COL_TOTAL     = 'Total'
+COL_SAP       = 'SAP Code'
 
 LABEL_PDS       = "Actual PDS"
 LABEL_DELIVERY  = "Actual Delivery"
@@ -201,6 +204,26 @@ def normalisasi_bulan(val):
             return f"{y}/{mo}"
 
     return None
+
+
+def konversi_bulan_header(s):
+    """Konversi 'Jan-26' → '2026/1', 'Feb-26' → '2026/2', dst."""
+    BULAN_MAP = {
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+    }
+    s = str(s).strip()
+    m = re.match(r'^([A-Za-z]{3})[\-/](\d{2,4})$', s)
+    if not m:
+        return None
+    bln_str = m.group(1).lower()
+    thn_str = m.group(2)
+    if bln_str not in BULAN_MAP:
+        return None
+    thn = int(thn_str)
+    if thn < 100:
+        thn += 2000
+    return f"{thn}/{BULAN_MAP[bln_str]}"
 
 
 def sort_bulan_key(b):
@@ -348,9 +371,12 @@ def ekstrak_data(df, kolom_bulan_map, nama_file=""):
                 nilai = {}
                 for bulan, col_idx in kolom_bulan_map.items():
                     v = row.iloc[col_idx] if col_idx < len(row) else None
-                    n = to_number(v)
-                    if n != 0:
-                        nilai[bulan] = n
+                    if v is None or pd.isna(v):
+                        continue
+                    s_v = str(v).strip()
+                    if s_v == '' or s_v.lower() in ('nan', 'none', '-'):
+                        continue
+                    nilai[bulan] = to_number(v)
                 if nilai:
                     if s_norm == LABEL_PDS.lower():
                         pds_map.setdefault(part_no_terakhir, {}).update(nilai)
@@ -431,76 +457,94 @@ def ekstrak_dari_banyak_file(files):
 
 
 # ╔═══════════════════════════════════════════════════════════════════════╗
-# ║  [11b] BACA FILE PDS & DELIVERY (format flat)                         ║
+# ║  [11b] BACA FILE PDS & DELIVERY                                       ║
+# ║  Format: SAP CODE | ITEM | Jan-26 | Feb-26 | ... | Dec-26             ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
 def baca_file_pds_delivery(file_obj):
     """
-    Baca file PDS & Delivery flat.
-    Format: Part Number, Part Name, Year/Month, Actual PDS, Delivery
-    Return: (pds_map, delivery_map, info)
+    Baca file PDS & Delivery.
+    Format: SAP CODE | ITEM | 2026/1 | 2026/2 | ...
+    PDS & Delivery qty SAMA (dari sumber yang sama).
+    Return: (pds_map, delivery_map, sap_map, info)
     """
     pds_map = {}
     delivery_map = {}
+    sap_map = {}
     errors = []
     total_rows = 0
     valid_rows = 0
 
     try:
         file_obj.seek(0)
-        df = pd.read_excel(file_obj, dtype=str)
+        df = pd.read_excel(file_obj, header=0, dtype=str)
     except:
         try:
             file_obj.seek(0)
-            df = pd.read_csv(file_obj, dtype=str)
+            df = pd.read_csv(file_obj, header=0, dtype=str)
         except Exception as e:
             raise ValueError(f"Tidak bisa baca file PDS/Delivery: {e}")
 
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
 
-    col_part = None
-    col_month = None
-    col_pds = None
-    col_del = None
+    col_sap = None
+    col_item = None
+    kolom_bulan_map = {}
 
     for c in df.columns:
-        if c in ('part number', 'part_number', 'partnumber', 'part no', 'part_no', 'partnumber'):
-            col_part = c
-        elif c in ('year/month', 'year_month', 'yearmonth', 'month', 'bulan', 'year-month', 'year/month '):
-            col_month = c
-        elif c in ('actual pds', 'actual_pds', 'pds', 'actual pds.', 'actualpos'):
-            col_pds = c
-        elif c in ('delivery', 'actual delivery', 'actual_delivery', 'actual delivery date', 'actualdelivery'):
-            col_del = c
+        c_low = c.lower()
+        if c_low in ('sap code', 'sap_code', 'sapcode', 'sap'):
+            col_sap = c
+        elif c_low in ('item', 'part number', 'part_number', 'partnumber', 'part no'):
+            col_item = c
+        else:
+            # Header bulan langsung format '2026/1' dst.
+            bulan = normalisasi_bulan(c)
+            if bulan and bulan not in kolom_bulan_map:
+                kolom_bulan_map[bulan] = c
 
-    if col_part is None:
-        raise ValueError("Kolom 'Part Number' tidak ditemukan di file PDS/Delivery")
-    if col_month is None:
-        raise ValueError("Kolom 'Year/Month' tidak ditemukan di file PDS/Delivery")
+    if col_item is None:
+        raise ValueError("Kolom 'ITEM' tidak ditemukan di file PDS/Delivery")
+    if not kolom_bulan_map:
+        raise ValueError("Tidak ada kolom bulan (2026/1, 2026/2, ...) di file PDS/Delivery")
+
+    def _ada_nilai(v):
+        if v is None:
+            return False
+        try:
+            if pd.isna(v):
+                return False
+        except:
+            pass
+        s = str(v).strip()
+        return s != '' and s.lower() not in ('nan', 'none', '-')
 
     for idx, row in df.iterrows():
         total_rows += 1
 
-        pn = str(row.get(col_part, '')).strip()
+        pn = str(row.get(col_item, '')).strip()
         if not pn or pn.lower() in ('nan', 'none', ''):
             continue
 
-        bulan_raw = row.get(col_month, '')
-        bulan = normalisasi_bulan(bulan_raw)
-        if bulan is None:
-            errors.append(f"Baris {idx+2}: bulan '{bulan_raw}' tidak valid")
-            continue
+        sap = str(row.get(col_sap, '')).strip() if col_sap else ''
+        if sap.lower() in ('nan', 'none'):
+            sap = ''
 
-        pds_val = to_number(row.get(col_pds, '')) if col_pds else 0
-        del_val = to_number(row.get(col_del, '')) if col_del else 0
+        if sap:
+            sap_map.setdefault(pn, sap)
 
-        if pds_val != 0:
-            pds_map.setdefault(pn, {})[bulan] = pds_val
-        if del_val != 0:
-            delivery_map.setdefault(pn, {})[bulan] = del_val
+        for bulan, nama_kolom in kolom_bulan_map.items():
+            v = row.get(nama_kolom, '')
+            if not _ada_nilai(v):
+                continue
+            num = to_number(v)
+            if num == 0:
+                continue
+            pds_map.setdefault(pn, {})[bulan] = num
+            delivery_map.setdefault(pn, {})[bulan] = num
 
         valid_rows += 1
 
-    return pds_map, delivery_map, {
+    return pds_map, delivery_map, sap_map, {
         'rows': total_rows,
         'valid': valid_rows,
         'errors': errors[:10]
@@ -515,23 +559,20 @@ def buat_template_pds_delivery(parts_unik=None, bulan_sorted=None):
 
     if parts_unik and bulan_sorted:
         rows = []
-        for pn, pname in parts_unik:
+        for item in parts_unik:
+            pn = item[0] if isinstance(item, (list, tuple)) else item
+            row = {'SAP CODE': '', 'ITEM': pn}
             for b in bulan_sorted:
-                rows.append({
-                    'Part Number': pn,
-                    'Part Name': pname,
-                    'Year/Month': b,
-                    'Actual PDS': '',
-                    'Delivery': '',
-                })
+                row[b] = ''
+            rows.append(row)
         df = pd.DataFrame(rows)
     else:
         df = pd.DataFrame({
-            'Part Number': ['CONTOH-001', 'CONTOH-001', 'CONTOH-002'],
-            'Part Name': ['PC BOARD CONTOH A', 'PC BOARD CONTOH A', 'PC BOARD CONTOH B'],
-            'Year/Month': ['2026/7', '2026/8', '2026/7'],
-            'Actual PDS': [150, 200, 300],
-            'Delivery': [160, 210, 320],
+            'SAP CODE': ['1347-03686', '1347-03580', '1347-03687'],
+            'ITEM': ['17M036-7010B', '17M036-7010A', '17M037-7010B'],
+            '2026/1': [150, 200, 300],
+            '2026/2': [160, 210, 320],
+            '2026/3': [170, 220, 330],
         })
 
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -545,17 +586,15 @@ def buat_template_pds_delivery(parts_unik=None, bulan_sorted=None):
             'font_color': 'white', 'border': 1
         })
         text_format = workbook.add_format({'border': 1, 'align': 'left'})
-        center_format = workbook.add_format({'border': 1, 'align': 'center'})
         number_format = workbook.add_format({'num_format': '#,##0', 'border': 1, 'align': 'right'})
 
         for col_num, col_name in enumerate(df.columns):
             worksheet.write(0, col_num, col_name, header_format)
 
-        worksheet.set_column(0, 0, 18, text_format)
-        worksheet.set_column(1, 1, 35, text_format)
-        worksheet.set_column(2, 2, 12, center_format)
-        worksheet.set_column(3, 3, 14, number_format)
-        worksheet.set_column(4, 4, 14, number_format)
+        worksheet.set_column(0, 0, 15, text_format)
+        worksheet.set_column(1, 1, 20, text_format)
+        if len(df.columns) > 2:
+            worksheet.set_column(2, len(df.columns) - 1, 14, number_format)
         worksheet.freeze_panes(1, 0)
 
     output.seek(0)
@@ -573,8 +612,6 @@ def ekstrak_dari_master(df_master):
     if df_master is None or len(df_master) == 0:
         return pd.DataFrame(), []
 
-    base_cols = ['Part Number', 'Part Name', 'Date', COL_FILE_FROM, COL_TOTAL, 'No']
-
     # Deteksi kolom bulan di master
     bulan_cols = []
     for c in df_master.columns:
@@ -589,7 +626,6 @@ def ekstrak_dari_master(df_master):
     if 'Part Number' in df_master.columns:
         df_master = df_master[~df_master['Part Number'].astype(str).isin(LABELS_RINGKASAN)]
 
-    # Susun data
     rows = []
     for idx in range(len(df_master)):
         row = df_master.iloc[idx]
@@ -607,11 +643,16 @@ def ekstrak_dari_master(df_master):
         if file_from.lower() in ('nan', 'none'):
             file_from = ''
 
+        sap_code = str(row.get(COL_SAP, '')).strip()
+        if sap_code.lower() in ('nan', 'none'):
+            sap_code = ''
+
         row_data = {
             'Part Number': pn,
             'Part Name': pname,
             'Date': date_val,
             COL_FILE_FROM: file_from,
+            COL_SAP: sap_code,
         }
         for b in bulan_sorted:
             if b in row.index:
@@ -634,36 +675,68 @@ def hitung_ringkasan_grup(group, bulan_sorted, pds_map=None, delivery_map=None):
 
     group = group.copy()
     group['_Date_sort'] = pd.to_datetime(group['Date'], errors='coerce')
-    group = group.sort_values('_Date_sort').reset_index(drop=True)
+    group = group.sort_values('_Date_sort', kind='stable').reset_index(drop=True)
     group['_bulan_date'] = group['Date'].apply(date_to_month_key)
 
+    def _ambil_angka(v):
+        if v is None:
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except:
+            pass
+        s = str(v).replace(',', '').strip()
+        if s == '' or s.lower() in ('nan', 'none', '-'):
+            return None
+        try:
+            return float(s)
+        except:
+            return None
+
+    # 1. Baris terakhir per bulan (berdasarkan Date, apapun nilai kolomnya)
+    #    → untuk qty_lalu
     baris_terakhir_per_bulan = {}
     for bln, sub in group.groupby('_bulan_date', sort=False):
         if bln is None:
             continue
         baris_terakhir_per_bulan[bln] = sub.iloc[-1]
 
+    # 2. Baris terakhir per bulan YANG NILAI KOLOM BULANNYA ≠ 0
+    #    → untuk qty_ini
+    baris_valid_per_bulan = {}
+    for bln, sub in group.groupby('_bulan_date', sort=False):
+        if bln is None:
+            continue
+        for i in range(len(sub) - 1, -1, -1):
+            row = sub.iloc[i]
+            v = _ambil_angka(row.get(bln))
+            if v is not None and v != 0:
+                baris_valid_per_bulan[bln] = row
+                break
+
     for b in bulan_sorted:
-        row_ini = baris_terakhir_per_bulan.get(b)
-        row_lalu = baris_terakhir_per_bulan.get(bulan_prev(b))
+        b_prev = bulan_prev(b)
 
+        # qty_ini: kolom b di baris terakhir bulan b yang kolom b-nya ≠ 0
+        row_ini = baris_valid_per_bulan.get(b)
         qty_ini = None
-        qty_lalu = None
-
         if row_ini is not None and b in row_ini.index:
-            try: qty_ini = float(row_ini[b])
-            except: qty_ini = None
-        if row_lalu is not None and b in row_lalu.index:
-            try: qty_lalu = float(row_lalu[b])
-            except: qty_lalu = None
+            qty_ini = _ambil_angka(row_ini[b])
 
-        # % FC Lates
+        # qty_lalu: kolom b di baris TERAKHIR bulan b_prev (apapun nilai kolom b-nya)
+        row_lalu = baris_terakhir_per_bulan.get(b_prev)
+        qty_lalu = None
+        if row_lalu is not None and b in row_lalu.index:
+            qty_lalu = _ambil_angka(row_lalu[b])
+
+        # % FC Lates vs FC Last Month
         if qty_ini is None or qty_lalu is None or qty_lalu == 0:
             hasil[LABEL_FC_LATES][b] = None
         else:
             hasil[LABEL_FC_LATES][b] = 1 - (qty_ini / qty_lalu)
 
-        # % FC vs Act PO (butuh PDS)
+        # % FC vs Act PO
         pds_b = pds.get(b) if pds else None
         if qty_ini is None or pds_b is None or pds_b == 0:
             hasil[LABEL_FC_ACT][b] = None
@@ -683,16 +756,22 @@ def hitung_ringkasan_grup(group, bulan_sorted, pds_map=None, delivery_map=None):
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  [13] FUNGSI PROSES UPDATE / GABUNG MASTER                            ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
-def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_all=None):
+def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_all=None, sap_map=None):
+    sap_map = sap_map or {}
     bulan_sorted = sorted(semua_bulan, key=sort_bulan_key)
     base_cols = ['Part Number', 'Part Name', 'Date', COL_FILE_FROM]
 
+    def build_kolom_baru():
+        return base_cols + [COL_SAP] + bulan_sorted + [COL_TOTAL]
+
     def normalize_df(df):
+        kolom_baru = build_kolom_baru()
         if df is None or len(df) == 0:
-            return pd.DataFrame(columns=base_cols + bulan_sorted + [COL_TOTAL])
+            return pd.DataFrame(columns=kolom_baru)
         df = df.copy()
         df = df.drop(columns=['No'], errors='ignore')
         df = df.drop(columns=[COL_TOTAL], errors='ignore')
+        df = df.drop(columns=[COL_SAP], errors='ignore')
         if 'Part Number' in df.columns:
             df = df[~df['Part Number'].astype(str).isin(LABELS_RINGKASAN)]
         for c in base_cols:
@@ -707,7 +786,13 @@ def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_a
             else:
                 df[b] = df[b].apply(to_number)
         df[COL_TOTAL] = df[bulan_sorted].sum(axis=1).astype(int)
-        return df[base_cols + bulan_sorted + [COL_TOTAL]]
+
+        # Tambah kolom SAP Code berdasarkan Part Number
+        df[COL_SAP] = df['Part Number'].apply(
+            lambda pn: sap_map.get(str(pn).strip(), '')
+        )
+
+        return df[kolom_baru]
 
     if df_master_lama is not None and len(df_master_lama) > 0:
         for c in list(df_master_lama.columns):
@@ -733,7 +818,8 @@ def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_a
 
     df_final = tambah_baris_ringkasan(
         df_combined, bulan_sorted,
-        pds_all or {}, delivery_all or {}
+        pds_all or {}, delivery_all or {},
+        sap_map
     )
     return df_final, bulan_sorted
 
@@ -741,11 +827,12 @@ def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_a
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  [14] FUNGSI TAMBAH BARIS RINGKASAN                                   ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
-def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None):
+def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None, sap_map=None):
     semua_baris = []
     counter_data = 0
     pds_all = pds_all or {}
     delivery_all = delivery_all or {}
+    sap_map = sap_map or {}
 
     for part_no, group in df.groupby('Part Number', sort=False):
         group = group.copy()
@@ -761,7 +848,7 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None):
         # Actual PDS
         row_pds = {
             'No': '', 'Part Number': LABEL_PDS, 'Part Name': '',
-            'Date': '', COL_FILE_FROM: '',
+            'Date': '', COL_FILE_FROM: '', COL_SAP: '',
         }
         for b in bulan_sorted:
             v = pds_grup.get(b)
@@ -772,7 +859,7 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None):
         # Actual Delivery
         row_del = {
             'No': '', 'Part Number': LABEL_DELIVERY, 'Part Name': '',
-            'Date': '', COL_FILE_FROM: '',
+            'Date': '', COL_FILE_FROM: '', COL_SAP: '',
         }
         for b in bulan_sorted:
             v = del_grup.get(b)
@@ -784,7 +871,7 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None):
         for label in LABELS_FORMULA:
             row_f = {
                 'No': '', 'Part Number': label, 'Part Name': '',
-                'Date': '', COL_FILE_FROM: '',
+                'Date': '', COL_FILE_FROM: '', COL_SAP: '',
             }
             for b in bulan_sorted:
                 v = ringkasan.get(label, {}).get(b)
@@ -889,15 +976,17 @@ def buat_excel(df, bulan_sorted):
                 worksheet.set_column(col_num, col_num, 12, center_format)
             elif col_name == COL_FILE_FROM:
                 worksheet.set_column(col_num, col_num, 35, text_format)
+            elif col_name == COL_SAP:
+                worksheet.set_column(col_num, col_num, 15, text_format)
             elif col_name == COL_TOTAL:
                 worksheet.set_column(col_num, col_num, 14, total_format)
             else:
                 worksheet.set_column(col_num, col_num, 12, bulan_kosong_format)
 
-        idx_no        = col_names.index('No')
-        idx_file_from = col_names.index(COL_FILE_FROM)
+        idx_no   = col_names.index('No')
+        idx_sap  = col_names.index(COL_SAP)
         merge_first = idx_no
-        merge_last  = idx_file_from
+        merge_last  = idx_sap
 
         for row_idx in range(len(df)):
             excel_row = row_idx + 1
@@ -944,7 +1033,7 @@ def buat_excel(df, bulan_sorted):
                     val = df.iloc[row_idx][col_name]
                     kosong = (val == '' or val is None or (isinstance(val, float) and pd.isna(val)))
 
-                    if col_name in ('Part Number', 'Part Name', COL_FILE_FROM):
+                    if col_name in ('Part Number', 'Part Name', COL_FILE_FROM, COL_SAP):
                         worksheet.write(excel_row, col_idx, '' if kosong else val, text_format)
                     elif col_name in ('No', 'Date'):
                         worksheet.write(excel_row, col_idx, '' if kosong else val, center_format)
@@ -1192,9 +1281,9 @@ with st.sidebar:
     mode = st.radio(
         "Mode",
         [
-            "🆕 Buat Master Baru",
-            "➕ Update Master",
-            "🧮 Hitung PDS & Delivery"
+            "Buat Master Baru",
+            "Update Master",
+            "Hitung PDS & Delivery"
         ],
         index=0,
         label_visibility="collapsed"
@@ -1211,7 +1300,7 @@ with st.sidebar:
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  [20] MODE 1: BUAT MASTER BARU                                        ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
-if mode == "🆕 Buat Master Baru":
+if mode == "Buat Master Baru":
     st.markdown(f'''
     <div class="section-title">{icon("file-plus", 22, "#4CAF50")} Buat Master Baru</div>
     <div class="info-box">{icon("info", 18, "#3b82f6")} Upload <b>satu atau lebih</b> file Excel sumber.</div>
@@ -1275,7 +1364,7 @@ if mode == "🆕 Buat Master Baru":
             st.dataframe(df_new.head(20), use_container_width=True)
 
             with st.spinner("Memproses master..."):
-                df_final, bulan_final = proses_update(None, df_new, semua_bulan, pds_all, delivery_all)
+                df_final, bulan_final = proses_update(None, df_new, semua_bulan, pds_all, delivery_all, {})
                 excel_bytes = buat_excel(df_final, bulan_final)
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1299,7 +1388,7 @@ if mode == "🆕 Buat Master Baru":
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  [21] MODE 2: UPDATE MASTER                                           ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
-elif mode == "➕ Update Master":
+elif mode == "Update Master":
     st.markdown(f'''
     <div class="section-title">{icon("file-check", 22, "#4CAF50")} Update Master</div>
     <div class="info-box">{icon("info", 18, "#3b82f6")} Upload <b>master lama</b> + <b>data baru</b> + (opsional) <b>file PDS &amp; Delivery</b>.</div>
@@ -1343,7 +1432,7 @@ elif mode == "➕ Update Master":
         <span style="font-weight:600;color:#111827;">3️⃣ File PDS &amp; Delivery (Opsional)</span>
     </div>
     <div style="font-size:0.85rem;color:#6b7280;margin-bottom:8px;">
-        Format: <b>Part Number, Part Name, Year/Month, Actual PDS, Delivery</b>
+        Format: <b>SAP CODE | ITEM | Jan-26 | Feb-26 | ... | Dec-26</b>
     </div>
     ''', unsafe_allow_html=True)
 
@@ -1357,7 +1446,7 @@ elif mode == "➕ Update Master":
         )
     with col_pds2:
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        if st.button("📥 Template Kosong", use_container_width=True, key='btn_template_empty_m2'):
+        if st.button("Template Kosong", use_container_width=True, key='btn_template_empty_m2'):
             template_bytes = buat_template_pds_delivery()
             st.download_button(
                 label="⬇ Download",
@@ -1400,10 +1489,11 @@ elif mode == "➕ Update Master":
             # Baca file PDS/Delivery kalau diupload
             pds_file_map = {}
             delivery_file_map = {}
+            sap_file_map = {}
             if file_pds is not None:
                 with st.spinner("Membaca file PDS & Delivery..."):
                     try:
-                        pds_file_map, delivery_file_map, pds_info = baca_file_pds_delivery(file_pds)
+                        pds_file_map, delivery_file_map, sap_file_map, pds_info = baca_file_pds_delivery(file_pds)
                         total_pds = sum(len(v) for v in pds_file_map.values())
                         total_del = sum(len(v) for v in delivery_file_map.values())
                         st.markdown(f'''
@@ -1415,6 +1505,7 @@ elif mode == "➕ Update Master":
                             <ul style="margin:6px 0 0 20px;padding:0;">
                                 <li>{pds_info['rows']} baris diproses, {pds_info['valid']} valid</li>
                                 <li>{total_pds} nilai PDS · {total_del} nilai Delivery</li>
+                                <li>{len(sap_file_map)} SAP Code</li>
                             </ul>
                         </div>
                         ''', unsafe_allow_html=True)
@@ -1434,8 +1525,14 @@ elif mode == "➕ Update Master":
             for pn, v in delivery_file_map.items():
                 delivery_gabung.setdefault(pn, {}).update(v)
 
+            sap_gabung = {}
+            sap_gabung.update(sap_file_map)
+
             with st.spinner("Menggabungkan & sorting..."):
-                df_final, bulan_final = proses_update(df_master_lama, df_new, semua_bulan, pds_gabung, delivery_gabung)
+                df_final, bulan_final = proses_update(
+                    df_master_lama, df_new, semua_bulan,
+                    pds_gabung, delivery_gabung, sap_gabung
+                )
                 excel_bytes = buat_excel(df_final, bulan_final)
 
             tampilkan_bulan_badges(bulan_final)
@@ -1475,7 +1572,7 @@ elif mode == "➕ Update Master":
                 pname = group.iloc[0].get('Part Name', '') if len(group) > 0 else ''
                 parts_unik_list.append((pn, pname))
 
-            with st.expander("📥 Buat Template PDS/Delivery (sesuai data)"):
+            with st.expander("Buat Template PDS/Delivery (sesuai data)"):
                 if st.button("Generate Template", key='btn_gen_template_m2'):
                     template_bytes = buat_template_pds_delivery(parts_unik_list, bulan_final)
                     st.download_button(
@@ -1502,7 +1599,7 @@ elif mode == "➕ Update Master":
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  [22] MODE 3: HITUNG PDS & DELIVERY SAJA                              ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
-else:  # mode == "🧮 Hitung PDS & Delivery"
+else:  # mode == "Hitung PDS & Delivery"
     st.markdown(f'''
     <div class="section-title">{icon("calculator", 22, "#4CAF50")} Hitung PDS &amp; Delivery</div>
     <div class="info-box">{icon("info", 18, "#3b82f6")} Upload <b>master lama</b> + <b>file PDS &amp; Delivery</b>. Master akan diperkaya dengan PDS/Delivery &amp; semua rumus dihitung ulang.</div>
@@ -1534,7 +1631,7 @@ else:  # mode == "🧮 Hitung PDS & Delivery"
             <span style="font-weight:600;color:#111827;">2️⃣ File PDS &amp; Delivery</span>
         </div>
         <div style="font-size:0.8rem;color:#6b7280;margin-bottom:6px;">
-            Format: Part Number, Part Name, Year/Month, Actual PDS, Delivery
+            Format: SAP CODE | ITEM | Jan-26 | Feb-26 | ... | Dec-26
         </div>
         ''', unsafe_allow_html=True)
         file_pds = st.file_uploader(
@@ -1549,7 +1646,7 @@ else:  # mode == "🧮 Hitung PDS & Delivery"
     # Tombol template kosong
     col_t1, col_t2 = st.columns([1, 3])
     with col_t1:
-        if st.button("📥 Template PDS/Delivery", use_container_width=True, key='btn_template_empty_m3'):
+        if st.button("Template PDS/Delivery", use_container_width=True, key='btn_template_empty_m3'):
             template_bytes = buat_template_pds_delivery()
             st.download_button(
                 label="⬇ Download Template Kosong",
@@ -1595,7 +1692,7 @@ else:  # mode == "🧮 Hitung PDS & Delivery"
 
             # 3. Baca file PDS & Delivery
             with st.spinner("Membaca file PDS & Delivery..."):
-                pds_map, delivery_map, pds_info = baca_file_pds_delivery(file_pds)
+                pds_map, delivery_map, sap_map, pds_info = baca_file_pds_delivery(file_pds)
 
             total_pds = sum(len(v) for v in pds_map.values())
             total_del = sum(len(v) for v in delivery_map.values())
@@ -1609,7 +1706,7 @@ else:  # mode == "🧮 Hitung PDS & Delivery"
                 <ul style="margin:6px 0 0 20px;padding:0;">
                     <li>{pds_info['rows']} baris diproses, {pds_info['valid']} valid</li>
                     <li>{total_pds} nilai PDS · {total_del} nilai Delivery</li>
-                    <li>{len(set(list(pds_map.keys()) + list(delivery_map.keys())))} Part Number</li>
+                    <li>{len(sap_map)} SAP Code · {len(set(list(pds_map.keys()) + list(delivery_map.keys())))} Part Number</li>
                 </ul>
             </div>
             ''', unsafe_allow_html=True)
@@ -1617,7 +1714,10 @@ else:  # mode == "🧮 Hitung PDS & Delivery"
             # 4. Proses ulang
             with st.spinner("Menghitung rumus..."):
                 semua_bulan_m3 = set(bulan_sorted_master)
-                df_final, bulan_final = proses_update(None, df_data, semua_bulan_m3, pds_map, delivery_map)
+                df_final, bulan_final = proses_update(
+                    None, df_data, semua_bulan_m3,
+                    pds_map, delivery_map, sap_map
+                )
                 excel_bytes = buat_excel(df_final, bulan_final)
 
             tampilkan_bulan_badges(bulan_final)
