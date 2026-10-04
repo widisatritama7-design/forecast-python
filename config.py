@@ -1,0 +1,20 @@
+# config.py
+PART_COL        = 0
+PART_NAME_COL   = 1
+ORDER_DATE_COL  = 14
+
+BULAN_SCAN_START = 16
+BULAN_SCAN_END   = 31
+
+COL_FILE_FROM = 'File From'
+COL_TOTAL     = 'Total'
+COL_SAP       = 'SAP Code'
+
+LABEL_PDS       = "Actual PDS"
+LABEL_DELIVERY  = "Actual Delivery"
+LABEL_FC_LATES  = "% FC Lates vs FC Last Month"
+LABEL_FC_ACT    = "% FC vs Act PO"
+LABEL_ACT_DEL   = "% Act PO vs Act Delivery"
+
+LABELS_RINGKASAN = [LABEL_PDS, LABEL_DELIVERY, LABEL_FC_LATES, LABEL_FC_ACT, LABEL_ACT_DEL]
+LABELS_FORMULA   = [LABEL_FC_LATES, LABEL_FC_ACT, LABEL_ACT_DEL]
