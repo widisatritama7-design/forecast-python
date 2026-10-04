@@ -742,7 +742,18 @@ def buat_excel(df, bulan_sorted):
 
         for row_idx in range(len(df)):
             excel_row = row_idx + 1
-            label = str(df.iloc[row_idx].get('Part Number', '')).strip()
+
+            # Cari label ringkasan di kolom mana saja
+            label = ''
+            for c in ['Part Number', 'No', 'Part Name']:
+                if c in df.columns:
+                    try:
+                        v = str(df.at[df.index[row_idx], c]).strip()
+                    except:
+                        v = ''
+                    if v in LABELS_RINGKASAN:
+                        label = v
+                        break
 
             if label in LABELS_RINGKASAN:
                 worksheet.merge_range(
@@ -755,7 +766,11 @@ def buat_excel(df, bulan_sorted):
                         continue
 
                     if col_name in bulan_sorted:
-                        val = df.iloc[row_idx][col_name]
+                        try:
+                            val = df.at[df.index[row_idx], col_name]
+                        except:
+                            val = ''
+
                         if label in (LABEL_PDS, LABEL_DELIVERY):
                             if val == '' or val is None or (isinstance(val, float) and pd.isna(val)):
                                 worksheet.write(excel_row, col_idx, '', ringkasan_value_format)
@@ -779,7 +794,10 @@ def buat_excel(df, bulan_sorted):
                         else:
                             worksheet.write(excel_row, col_idx, '', ringkasan_empty_format)
                     elif col_name == COL_TOTAL:
-                        val = df.iloc[row_idx][col_name]
+                        try:
+                            val = df.at[df.index[row_idx], col_name]
+                        except:
+                            val = ''
                         kosong = (val == '' or val is None or (isinstance(val, float) and pd.isna(val)))
                         if kosong:
                             worksheet.write(excel_row, col_idx, '', ringkasan_empty_format)
@@ -798,7 +816,10 @@ def buat_excel(df, bulan_sorted):
                                 worksheet.write(excel_row, col_idx, num, ringkasan_value_format)
             else:
                 for col_idx, col_name in enumerate(col_names):
-                    val = df.iloc[row_idx][col_name]
+                    try:
+                        val = df.at[df.index[row_idx], col_name]
+                    except:
+                        val = ''
                     kosong = (val == '' or val is None or (isinstance(val, float) and pd.isna(val)))
 
                     if col_name in ('Part Number', 'Part Name', COL_FILE_FROM, COL_SAP):
@@ -825,7 +846,17 @@ def buat_excel(df, bulan_sorted):
         bulan_to_col_idx = {b: col_names.index(b) for b in bulan_sorted if b in col_names}
         for row_idx in range(len(df)):
             excel_row = row_idx + 1
-            label = str(df.iloc[row_idx].get('Part Number', '')).strip()
+            label = ''
+            for c in ['Part Number', 'No', 'Part Name']:
+                if c in df.columns:
+                    try:
+                        v = str(df.at[df.index[row_idx], c]).strip()
+                    except:
+                        v = ''
+                    if v in LABELS_FORMULA:
+                        label = v
+                        break
+
             if label not in LABELS_FORMULA:
                 continue
             for b in bulan_sorted:

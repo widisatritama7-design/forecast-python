@@ -222,7 +222,12 @@ with st.sidebar:
 
         mode = st.radio(
             "Mode",
-            ["Buat Master (Paste)", "Update Master", "Hitung PDS & Delivery"],
+            [
+                "Buat Master (Paste)",
+                "Update Master",
+                "Input Actual PDS",
+                "Input Actual Delivery"
+            ],
             index=0,
             label_visibility="collapsed",
             key="mode_mitsuba"
