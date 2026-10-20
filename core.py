@@ -389,6 +389,8 @@ def ekstrak_dari_master(df_master):
     df_master = df_master.copy()
     if 'Part Number' in df_master.columns:
         df_master = df_master[~df_master['Part Number'].astype(str).isin(LABELS_RINGKASAN)]
+    if 'Part Name' in df_master.columns:
+        df_master = df_master[~df_master['Part Name'].astype(str).isin(LABELS_RINGKASAN)]
 
     rows = []
     for idx in range(len(df_master)):
@@ -488,10 +490,10 @@ def hitung_ringkasan_grup(group, bulan_sorted, pds_map=None, delivery_map=None):
         if row_lalu is not None and b in row_lalu.index:
             qty_lalu = _ambil_angka(row_lalu[b])
 
-        if qty_ini is None or qty_lalu is None or qty_lalu == 0:
+        if qty_ini is None or qty_lalu is None or qty_ini == 0:
             hasil[LABEL_FC_LATES][b] = None
         else:
-            hasil[LABEL_FC_LATES][b] = 1 - (qty_ini / qty_lalu)
+            hasil[LABEL_FC_LATES][b] = 1 - (qty_lalu / qty_ini)
 
         pds_b = pds.get(b) if pds else None
         if qty_ini is None or pds_b is None or pds_b == 0:
@@ -529,6 +531,8 @@ def proses_update(df_master_lama, df_baru, semua_bulan, pds_all=None, delivery_a
         df = df.drop(columns=[COL_SAP], errors='ignore')
         if 'Part Number' in df.columns:
             df = df[~df['Part Number'].astype(str).isin(LABELS_RINGKASAN)]
+        if 'Part Name' in df.columns:
+            df = df[~df['Part Name'].astype(str).isin(LABELS_RINGKASAN)]
         for c in base_cols:
             if c not in df.columns:
                 df[c] = ''
@@ -595,9 +599,9 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None, sa
 
         ringkasan = hitung_ringkasan_grup(group, bulan_sorted, pds_grup, del_grup)
 
-        # Actual PDS
+        # Actual PDS  (Part Name = label untuk layout baru)
         row_pds = {
-            'No': '', 'Part Number': LABEL_PDS, 'Part Name': '',
+            'No': '', 'Part Number': LABEL_PDS, 'Part Name': LABEL_PDS,
             'Date': '', COL_FILE_FROM: '', COL_SAP: '',
         }
         for b in bulan_sorted:
@@ -610,7 +614,7 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None, sa
 
         # Actual Delivery
         row_del = {
-            'No': '', 'Part Number': LABEL_DELIVERY, 'Part Name': '',
+            'No': '', 'Part Number': LABEL_DELIVERY, 'Part Name': LABEL_DELIVERY,
             'Date': '', COL_FILE_FROM: '', COL_SAP: '',
         }
         for b in bulan_sorted:
@@ -624,7 +628,7 @@ def tambah_baris_ringkasan(df, bulan_sorted, pds_all=None, delivery_all=None, sa
         # Formula
         for label in LABELS_FORMULA:
             row_f = {
-                'No': '', 'Part Number': label, 'Part Name': '',
+                'No': '', 'Part Number': label, 'Part Name': label,
                 'Date': '', COL_FILE_FROM: '', COL_SAP: '',
             }
             total_pct = 0.0
@@ -703,6 +707,12 @@ def buat_excel(df, bulan_sorted):
             'font_color': '#B71C1C',
             'bold': True,
         })
+        formula_na_format = workbook.add_format({
+            'border': 1, 'align': 'center',
+            'bg_color': '#F3F4F6',
+            'font_color': '#6B7280',
+            'italic': True,
+        })
         cond_hijau = workbook.add_format({
             'bg_color': '#C8E6C9', 'font_color': '#1B5E20',
             'bold': True, 'num_format': '0.00%',
@@ -736,8 +746,11 @@ def buat_excel(df, bulan_sorted):
                 worksheet.set_column(col_num, col_num, 12, bulan_kosong_format)
 
         idx_no = col_names.index('No')
+        idx_pn = col_names.index('Part Number')
+        idx_pname = col_names.index('Part Name')
         idx_sap = col_names.index(COL_SAP)
-        merge_first = idx_no
+        # Merge mulai dari Part Name s/d SAP Code (layout baru)
+        merge_first = idx_pname
         merge_last = idx_sap
 
         for row_idx in range(len(df)):
@@ -756,6 +769,22 @@ def buat_excel(df, bulan_sorted):
                         break
 
             if label in LABELS_RINGKASAN:
+                # Cari part number asli: baris data terakhir di atasnya
+                part_no_asli = ''
+                for prev in range(row_idx - 1, -1, -1):
+                    try:
+                        pn_prev = str(df.at[df.index[prev], 'Part Number']).strip()
+                    except:
+                        pn_prev = ''
+                    if pn_prev and pn_prev not in LABELS_RINGKASAN:
+                        part_no_asli = pn_prev
+                        break
+
+                # Tulis No (kosong) dan Part Number (asli) SEBELUM merge
+                worksheet.write(excel_row, idx_no, '', ringkasan_merged_format)
+                worksheet.write(excel_row, idx_pn, part_no_asli, ringkasan_merged_format)
+
+                # Merge dari Part Name s/d SAP Code, isi dengan label
                 worksheet.merge_range(
                     excel_row, merge_first, excel_row, merge_last,
                     label, ringkasan_merged_format
@@ -788,7 +817,7 @@ def buat_excel(df, bulan_sorted):
                                 except:
                                     num = None
                             if num is None:
-                                worksheet.write(excel_row, col_idx, '-', formula_error_format)
+                                worksheet.write(excel_row, col_idx, 'N/A', formula_na_format)
                             else:
                                 worksheet.write(excel_row, col_idx, num, formula_format)
                         else:
@@ -876,7 +905,6 @@ def buat_excel(df, bulan_sorted):
 
     output.seek(0)
     return output
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  UI: TAMPILKAN INFO FILE
